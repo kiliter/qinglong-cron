@@ -1,0 +1,47 @@
+README.md
+  s_603a75da2004cb::t_b8e611d4c1e32c 3,12,62-68,83
+  s_603a75da2004cb::t_c233182f7ddae8 89
+  s_603a75da2004cb::t_ad302c35d83c0e 13,69-70,87
+tests/test_lucky_webdav_backup.py
+  s_603a75da2004cb::t_5424caf0457775 234-255,313,333-387
+  s_603a75da2004cb::t_efcf08e1540210 314-332
+  s_603a75da2004cb::t_69afb786cd3987 120-122,195-200,227,262,274-275,278-285,303-312
+  s_603a75da2004cb::t_7ebad5edfabee7 60,96,113,128,161,298,388-432
+  s_603a75da2004cb::t_ad302c35d83c0e 461-462
+  s_603a75da2004cb::t_5109bd427107b8 58,115-119
+  s_603a75da2004cb::t_376be343cb8611 256-257
+  s_603a75da2004cb::t_37ad2d4076640f 433
+tasks/lucky_webdav_backup.py
+  s_603a75da2004cb::t_43a5f438090b98 247-256,264
+  s_603a75da2004cb::t_0187484d519fca 73,75,88,167-187,229-245,263
+  s_603a75da2004cb::t_ad302c35d83c0e 457
+  s_603a75da2004cb::t_1e0a437452ae66 422,453,471-492,495,497,501,503-510
+  s_603a75da2004cb::t_2d1829551b1aac 550,560
+  s_603a75da2004cb::t_bb4b823ac9088b 575-577,592,594-597,599-604,606-607,632-637,642,644-649
+  s_603a75da2004cb::t_13bc5b4cd8a1c9 579-580,598,605,608-631,638-641,643
+  s_603a75da2004cb::t_60ee6acbd74848 28,37,89,105
+  s_603a75da2004cb::t_5c9d62516b9455 246
+docs/superpowers/specs/2026-08-20-lucky-webdav-backup-design.md
+  s_603a75da2004cb::t_b8e611d4c1e32c 5,20-21,47,60,87-90
+  s_603a75da2004cb::t_ad302c35d83c0e 22-23,44,54,74
+  s_603a75da2004cb::t_c233182f7ddae8 56,64
+examples/lucky_backup_config.example.json
+  s_603a75da2004cb::t_b8e611d4c1e32c 17-34
+  s_603a75da2004cb::t_ad302c35d83c0e 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "623eeba154ec7aa68d893ca70c2ef832f65b80f7",
+  "prompts": {},
+  "sessions": {
+    "s_603a75da2004cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f51-35f3-7a70-8ce7-36f61f4b1828",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
