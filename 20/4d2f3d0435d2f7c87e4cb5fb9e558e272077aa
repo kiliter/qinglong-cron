@@ -1,0 +1,24 @@
+README.md
+  s_f9dea9a0962433::t_bea7cb8b3e367b 77,86
+tests/test_lucky_webdav_backup.py
+  s_f9dea9a0962433::t_bea7cb8b3e367b 228-230,232,245,247-251
+tasks/lucky_webdav_backup.py
+  s_f9dea9a0962433::t_ee856290f762f3 391-404,458-462,465,542
+  s_f9dea9a0962433::t_77c6ce7c36d5ed 390
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "204d2f3d0435d2f7c87e4cb5fb9e558e272077aa",
+  "prompts": {},
+  "sessions": {
+    "s_f9dea9a0962433": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01eae-5580-7fa0-bfbe-9d40779ec1b5",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}
