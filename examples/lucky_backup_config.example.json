@@ -14,13 +14,24 @@
       "verify_ssl": true
     }
   ],
-  "webdav": {
-    "url": "https://dav.example.com/dav/user",
-    "username": "请替换为 WebDAV 用户名",
-    "password": "请替换为 WebDAV 密码",
-    "remote_root": "/qinglong/lucky-backup",
-    "verify_ssl": true
-  },
-  "retention_days": 30,
+  "webdavs": [
+    {
+      "name": "主存储",
+      "url": "https://dav-primary.example.com/dav/user",
+      "username": "请替换为主 WebDAV 用户名",
+      "password": "请替换为主 WebDAV 密码",
+      "remote_root": "/qinglong/lucky-backup",
+      "verify_ssl": true
+    },
+    {
+      "name": "副存储",
+      "url": "https://dav-secondary.example.com/dav/user",
+      "username": "请替换为副 WebDAV 用户名",
+      "password": "请替换为副 WebDAV 密码",
+      "remote_root": "/qinglong/lucky-backup",
+      "verify_ssl": true
+    }
+  ],
+  "retention_count": 30,
   "timeout_seconds": 60
 }

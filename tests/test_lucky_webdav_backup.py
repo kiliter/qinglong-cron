@@ -55,7 +55,9 @@ class MockState:
     collections: set[str] = field(default_factory=set)
     deleted_paths: list[str] = field(default_factory=list)
     missing_collections: set[str] = field(default_factory=set)
+    failed_upload_roots: set[str] = field(default_factory=set)
     received_tokens: list[str | None] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +93,7 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - HTTPServer 约定的方法名称。
         state = self.server.state
         path = urllib.parse.urlsplit(self.path).path
+        state.events.append(f"GET {path}")
         state.received_tokens.append(self.headers.get("openToken"))
         status, body = state.lucky_responses.get(path, (404, b"not found"))
         self._send(status, body, "application/zip" if status == 200 else "text/html")
@@ -107,13 +110,22 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802 - WebDAV 方法名称。
         state = self.server.state
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        state.events.append(f"PUT {path}")
         size = int(self.headers.get("Content-Length", "0"))
-        state.uploads[path] = self.rfile.read(size)
+        upload_data = self.rfile.read(size)
+        if any(path.startswith(root + "/") for root in state.failed_upload_roots):
+            self._send(500)
+            return
+        state.uploads[path] = upload_data
+        # 上传成功后立即加入目录列表，模拟真实 WebDAV 随后的 PROPFIND 结果。
+        directory, _, filename = path.rpartition("/")
+        state.remote_files.setdefault(directory, []).append((filename, None))
         self._send(201)
 
     def do_PROPFIND(self) -> None:  # noqa: N802 - WebDAV 方法名称。
         state = self.server.state
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).rstrip("/")
+        state.events.append(f"PROPFIND {path}")
         # 读取并丢弃请求体，避免连接复用时残留数据。
         size = int(self.headers.get("Content-Length", "0"))
         if size:
@@ -146,6 +158,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802 - WebDAV 方法名称。
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        self.server.state.events.append(f"DELETE {path}")
         self.server.state.deleted_paths.append(path)
         self._send(204)
 
@@ -179,7 +192,12 @@ class MockServices:
         self.thread.join(timeout=2)
 
 
-def make_config(base_url: str, *, include_failed_lucky: bool = False) -> str:
+def make_config(
+    base_url: str,
+    *,
+    include_failed_lucky: bool = False,
+    retention_count: int = 30,
+) -> str:
     """生成仅含虚假凭据的测试配置。"""
 
     luckies = [
@@ -206,18 +224,42 @@ def make_config(base_url: str, *, include_failed_lucky: bool = False) -> str:
                 "password": "DAV_PASSWORD_SECRET",
                 "remote_root": "/qinglong/lucky-backup",
             },
-            "retention_days": 30,
+            "retention_count": retention_count,
             "timeout_seconds": 5,
         },
         ensure_ascii=False,
     )
 
 
+def make_multi_webdav_config(base_url: str, *, retention_count: int = 2) -> str:
+    """生成包含两个 WebDAV 目标的测试配置。"""
+
+    config = json.loads(make_config(base_url, retention_count=retention_count))
+    config.pop("webdav")
+    config["webdavs"] = [
+        {
+            "name": "主存储",
+            "url": f"{base_url}/dav",
+            "username": "DAV_USER_A_SECRET",
+            "password": "DAV_PASSWORD_A_SECRET",
+            "remote_root": "/backup-a",
+        },
+        {
+            "name": "副存储",
+            "url": f"{base_url}/dav",
+            "username": "DAV_USER_B_SECRET",
+            "password": "DAV_PASSWORD_B_SECRET",
+            "remote_root": "/backup-b",
+        },
+    ]
+    return json.dumps(config, ensure_ascii=False)
+
+
 class BackupTaskTests(unittest.TestCase):
     """备份任务主要行为测试。"""
 
     def test_success_upload_cleanup_and_notification(self) -> None:
-        """成功场景应上传备份、只清理过期匹配文件并通知一次。"""
+        """成功场景应上传备份，并按数量删除最旧的任务文件。"""
 
         with MockServices() as services:
             state = services.state
@@ -229,15 +271,18 @@ class BackupTaskTests(unittest.TestCase):
                 ("主路由_20260602_030000.zip", format_datetime(datetime(2026, 6, 2, tzinfo=timezone.utc))),
                 ("lucky.主路由.20260810_030000.zip", format_datetime(datetime(2026, 8, 10, tzinfo=timezone.utc))),
                 ("手工备份.zip", format_datetime(datetime(2026, 1, 1, tzinfo=timezone.utc))),
-                ("lucky.主路由.20260501_030000.zip", None),
+                # 日期不合法的文件即使名称相似也不得删除。
+                ("lucky.主路由.20261301_030000.zip", None),
             ]
 
-            config = parse_config(make_config(services.base_url))
-            exit_code = run_task(
-                config,
-                now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
-                notification_sender=ql_api.notify,
-            )
+            config = parse_config(make_config(services.base_url, retention_count=2))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
 
             self.assertEqual(0, exit_code)
             uploaded_paths = list(state.uploads)
@@ -250,9 +295,141 @@ class BackupTaskTests(unittest.TestCase):
                 },
                 set(state.deleted_paths),
             )
+            self.assertIn("已删除 2 个多余备份，保留最新 2 个", output.getvalue())
             self.assertEqual(["TOKEN_MAIN_SECRET"], state.received_tokens)
             self.assertEqual(1, len(ql_api.notifications))
             self.assertIn("Lucky 配置备份成功", ql_api.notifications[0][1])
+
+    def test_legacy_retention_days_is_used_as_retention_count(self) -> None:
+        """旧配置字段应继续生效，并按备份数量解释其数值。"""
+
+        raw_config = json.loads(make_config("https://example.com", retention_count=30))
+        raw_config.pop("retention_count")
+        raw_config["retention_days"] = 5
+
+        config = parse_config(json.dumps(raw_config, ensure_ascii=False))
+
+        self.assertEqual(5, config.retention_count)
+
+    def test_retention_count_five_deletes_the_sixth_backup(self) -> None:
+        """配置保留 5 个时，第 6 个最旧备份应立即删除。"""
+
+        client = mock.Mock()
+        client.list_files.return_value = [
+            backup_module.RemoteFile(f"lucky.主路由.202608{day:02d}_030000.zip")
+            for day in range(15, 21)
+        ]
+        luckies = parse_config(
+            make_config("https://example.com", retention_count=5)
+        ).luckies
+
+        deleted_count = backup_module.cleanup_excess_backups(client, luckies, 5)
+
+        self.assertEqual(1, deleted_count)
+        client.delete.assert_called_once_with(
+            "主路由", "lucky.主路由.20260815_030000.zip"
+        )
+
+    def test_multiple_webdavs_upload_and_cleanup_independently(self) -> None:
+        """一次下载应上传到全部 WebDAV，并分别执行数量清理。"""
+
+        with MockServices() as services:
+            state = services.state
+            state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip())
+            for root in ("backup-a", "backup-b"):
+                directory = f"/dav/{root}/主路由"
+                state.remote_files[directory] = [
+                    ("lucky.主路由.20260817_030000.zip", None),
+                    ("lucky.主路由.20260818_030000.zip", None),
+                    ("lucky.主路由.20260819_030000.zip", None),
+                ]
+
+            config = parse_config(make_multi_webdav_config(services.base_url))
+            output = io.StringIO()
+            ql_api = FakeQLAPI()
+            with contextlib.redirect_stdout(output):
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(2, len(state.uploads))
+            self.assertEqual(4, len(state.deleted_paths))
+            self.assertEqual(["TOKEN_MAIN_SECRET"], state.received_tokens)
+            self.assertIn("上传成功：主存储、副存储", output.getvalue())
+            self.assertIn("主存储：已删除 2 个多余备份", output.getvalue())
+            self.assertIn("副存储：已删除 2 个多余备份", output.getvalue())
+
+    def test_one_webdav_failure_does_not_block_other_target(self) -> None:
+        """一个 WebDAV 上传失败时，其他目标仍应上传并清理。"""
+
+        with MockServices() as services:
+            state = services.state
+            state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip())
+            state.failed_upload_roots.add("/dav/backup-b")
+            config = parse_config(make_multi_webdav_config(services.base_url))
+            output = io.StringIO()
+            ql_api = FakeQLAPI()
+
+            with contextlib.redirect_stdout(output):
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
+
+            self.assertEqual(1, exit_code)
+            self.assertEqual(1, len(state.uploads))
+            self.assertEqual(["TOKEN_MAIN_SECRET"], state.received_tokens)
+            self.assertIn("上传成功：主存储", output.getvalue())
+            self.assertIn("上传失败：副存储", output.getvalue())
+            self.assertFalse(
+                any(event.startswith("PROPFIND /dav/backup-b/") for event in state.events)
+            )
+
+    def test_each_lucky_finishes_upload_and_cleanup_before_next_lucky(self) -> None:
+        """每个 Lucky 必须完成全部上传和清理后，才开始拉取下一个实例。"""
+
+        with MockServices() as services:
+            state = services.state
+            state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip("主路由"))
+            state.lucky_responses["/lucky-side/api/configure"] = (200, make_zip("旁路由"))
+            raw_config = json.loads(make_multi_webdav_config(services.base_url))
+            raw_config["luckies"].append(
+                {
+                    "name": "旁路由",
+                    "base_url": f"{services.base_url}/lucky-side",
+                    "open_token": "TOKEN_SIDE_SECRET",
+                }
+            )
+            config = parse_config(json.dumps(raw_config, ensure_ascii=False))
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=FakeQLAPI().notify,
+                )
+
+            self.assertEqual(0, exit_code)
+            main_put_indexes = [
+                index
+                for index, event in enumerate(state.events)
+                if event.startswith("PUT ") and "/主路由/" in event
+            ]
+            main_cleanup_indexes = [
+                index
+                for index, event in enumerate(state.events)
+                if event.startswith("PROPFIND ") and event.endswith("/主路由")
+            ]
+            side_get_index = state.events.index("GET /lucky-side/api/configure")
+
+            self.assertEqual(2, len(main_put_indexes))
+            self.assertEqual(2, len(main_cleanup_indexes))
+            self.assertLess(max(main_put_indexes), min(main_cleanup_indexes))
+            self.assertLess(max(main_cleanup_indexes), side_get_index)
 
     def test_one_lucky_failure_does_not_stop_other_instances(self) -> None:
         """一个 Lucky 返回 HTML 时，成功实例仍上传且最终返回失败状态。"""
@@ -281,8 +458,8 @@ class BackupTaskTests(unittest.TestCase):
             notice = ql_api.notifications[0][1]
             self.assertIn("旁路由", notice)
             self.assertIn("内容不是 ZIP", notice)
-            self.assertNotIn("过期备份清理失败", output.getvalue())
-            self.assertNotIn("❌ **过期清理**", notice)
+            self.assertNotIn("备份清理失败", output.getvalue())
+            self.assertNotIn("❌ **备份清理**", notice)
 
             # 日志与通知都不得暴露三类真实凭据。
             combined_text = output.getvalue() + notice

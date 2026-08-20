@@ -25,8 +25,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from xml.etree import ElementTree
@@ -35,7 +34,7 @@ from xml.etree import ElementTree
 CONFIG_ENV_NAME = "LUCKY_BACKUP_CONFIG"
 DEFAULT_BACKUP_API_PATH = "/api/configure"
 DEFAULT_REMOTE_ROOT = "/qinglong/lucky-backup"
-DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_COUNT = 30
 DEFAULT_TIMEOUT_SECONDS = 60
 MAX_BACKUP_BYTES = 100 * 1024 * 1024
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
@@ -71,8 +70,9 @@ class LuckyConfig:
 
 @dataclass(frozen=True)
 class WebDAVConfig:
-    """唯一 WebDAV 目标配置。"""
+    """一个 WebDAV 备份目标配置。"""
 
+    name: str
     url: str
     username: str
     password: str
@@ -85,8 +85,8 @@ class AppConfig:
     """一次任务运行所需的完整配置。"""
 
     luckies: tuple[LuckyConfig, ...]
-    webdav: WebDAVConfig
-    retention_days: int = DEFAULT_RETENTION_DAYS
+    webdavs: tuple[WebDAVConfig, ...]
+    retention_count: int = DEFAULT_RETENTION_COUNT
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
 
@@ -102,11 +102,9 @@ class InstanceResult:
 
 @dataclass(frozen=True)
 class RemoteFile:
-    """WebDAV PROPFIND 返回的远端文件信息。"""
+    """WebDAV PROPFIND 返回的远端文件名称。"""
 
     name: str
-    modified_at: datetime | None
-    is_collection: bool
 
 
 def _require_mapping(value: Any, field_name: str) -> dict[str, Any]:
@@ -166,6 +164,27 @@ def _validate_remote_root(value: str) -> str:
     return "/" + "/".join(parts)
 
 
+def _parse_webdav_config(value: Any, field_name: str, default_name: str) -> WebDAVConfig:
+    """解析一个 WebDAV 目标，并为旧配置补充可读的默认名称。"""
+
+    webdav_obj = _require_mapping(value, field_name)
+    raw_name = webdav_obj.get("name", default_name)
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ConfigError(f"配置字段 {field_name}.name 必须是非空字符串")
+    return WebDAVConfig(
+        name=raw_name.strip(),
+        url=_validate_http_url(
+            _require_string(webdav_obj, "url", field_name), f"{field_name}.url"
+        ),
+        username=_require_string(webdav_obj, "username", field_name),
+        password=_require_string(webdav_obj, "password", field_name),
+        remote_root=_validate_remote_root(
+            str(webdav_obj.get("remote_root", DEFAULT_REMOTE_ROOT)).strip()
+        ),
+        verify_ssl=_read_bool(webdav_obj, "verify_ssl", True, field_name),
+    )
+
+
 def parse_config(raw: str) -> AppConfig:
     """解析并完整校验 ``LUCKY_BACKUP_CONFIG``。"""
 
@@ -207,28 +226,42 @@ def parse_config(raw: str) -> AppConfig:
             )
         )
 
-    webdav_obj = _require_mapping(root.get("webdav"), "webdav")
-    webdav = WebDAVConfig(
-        url=_validate_http_url(_require_string(webdav_obj, "url", "webdav"), "webdav.url"),
-        username=_require_string(webdav_obj, "username", "webdav"),
-        password=_require_string(webdav_obj, "password", "webdav"),
-        remote_root=_validate_remote_root(
-            str(webdav_obj.get("remote_root", DEFAULT_REMOTE_ROOT)).strip()
-        ),
-        verify_ssl=_read_bool(webdav_obj, "verify_ssl", True, "webdav"),
-    )
+    if "webdav" in root and "webdavs" in root:
+        raise ConfigError("配置字段 webdav 与 webdavs 不能同时设置")
+    if "webdavs" in root:
+        webdav_items = root["webdavs"]
+        if not isinstance(webdav_items, list) or not webdav_items:
+            raise ConfigError("配置字段 webdavs 必须是非空数组")
+        webdavs = tuple(
+            _parse_webdav_config(item, f"webdavs[{index}]", f"WebDAV {index + 1}")
+            for index, item in enumerate(webdav_items)
+        )
+    else:
+        # 继续兼容原有单目标 webdav 对象，避免用户升级时必须立即迁移配置。
+        webdavs = (_parse_webdav_config(root.get("webdav"), "webdav", "默认 WebDAV"),)
 
-    retention_days = root.get("retention_days", DEFAULT_RETENTION_DAYS)
-    if not isinstance(retention_days, int) or isinstance(retention_days, bool) or not 1 <= retention_days <= 3650:
-        raise ConfigError("配置字段 retention_days 必须是 1 到 3650 之间的整数")
+    webdav_names = [webdav.name for webdav in webdavs]
+    if len(set(webdav_names)) != len(webdav_names):
+        raise ConfigError("配置字段 webdavs 中的 name 不得重复")
+
+    # 新配置使用 retention_count；旧配置继续读取 retention_days，避免升级后突然恢复默认值。
+    # 兼容字段只保留读取能力，其数值同样解释为“每个实例保留的备份数量”。
+    retention_field = "retention_count" if "retention_count" in root else "retention_days"
+    retention_count = root.get(retention_field, DEFAULT_RETENTION_COUNT)
+    if (
+        not isinstance(retention_count, int)
+        or isinstance(retention_count, bool)
+        or not 1 <= retention_count <= 3650
+    ):
+        raise ConfigError(f"配置字段 {retention_field} 必须是 1 到 3650 之间的整数")
     timeout_seconds = root.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 5 <= timeout_seconds <= 600:
         raise ConfigError("配置字段 timeout_seconds 必须是 5 到 600 之间的整数")
 
     return AppConfig(
         luckies=tuple(luckies),
-        webdav=webdav,
-        retention_days=retention_days,
+        webdavs=webdavs,
+        retention_count=retention_count,
         timeout_seconds=timeout_seconds,
     )
 
@@ -386,7 +419,7 @@ class WebDAVClient:
         """使用 Depth=1 的 PROPFIND 列出实例目录中的文件。"""
 
         request_body = b"""<?xml version="1.0" encoding="utf-8"?>
-<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getlastmodified/></d:prop></d:propfind>"""
+<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"""
         try:
             _, _, body = http_request(
                 self.url_for(instance_name),
@@ -417,20 +450,11 @@ class WebDAVClient:
             name = decoded_path.rstrip("/").rsplit("/", 1)[-1]
             if is_collection or not name:
                 continue
-            modified_node = response.find(".//{DAV:}getlastmodified")
-            modified_at: datetime | None = None
-            if modified_node is not None and modified_node.text:
-                try:
-                    modified_at = parsedate_to_datetime(modified_node.text)
-                    if modified_at.tzinfo is None:
-                        modified_at = modified_at.replace(tzinfo=timezone.utc)
-                except (TypeError, ValueError, OverflowError):
-                    modified_at = None
-            files.append(RemoteFile(name=name, modified_at=modified_at, is_collection=False))
+            files.append(RemoteFile(name=name))
         return files
 
     def delete(self, instance_name: str, filename: str) -> None:
-        """删除一个已由调用方严格筛选的过期备份文件。"""
+        """删除一个已由调用方严格筛选的多余备份文件。"""
 
         status, _, _ = http_request(
             self.url_for(instance_name, filename),
@@ -444,31 +468,46 @@ class WebDAVClient:
             raise RequestError(f"DELETE 请求返回非预期状态 {status}")
 
 
-def cleanup_expired_backups(
+def backup_timestamp_from_filename(filename: str, instance_name: str) -> datetime | None:
+    """从当前或历史备份文件名中解析时间；非任务文件返回 ``None``。"""
+
+    escaped_name = re.escape(instance_name)
+    filename_patterns = (
+        re.compile(rf"^lucky\.{escaped_name}\.(?P<timestamp>\d{{8}}_\d{{6}})\.zip$"),
+        # 兼容改名前生成的历史备份，使它们也参与数量限制。
+        re.compile(rf"^{escaped_name}_(?P<timestamp>\d{{8}}_\d{{6}})\.zip$"),
+    )
+    for pattern in filename_patterns:
+        match = pattern.fullmatch(filename)
+        if match is None:
+            continue
+        try:
+            return datetime.strptime(match.group("timestamp"), "%Y%m%d_%H%M%S")
+        except ValueError:
+            # 日期数字不合法时按手工文件处理，避免误删。
+            return None
+    return None
+
+
+def cleanup_excess_backups(
     client: WebDAVClient,
     luckies: Iterable[LuckyConfig],
-    retention_days: int,
-    now: datetime,
+    retention_count: int,
 ) -> int:
-    """只删除本任务固定命名规则且早于保留边界的 ZIP 文件。"""
+    """每个实例仅保留文件名时间最新的指定数量备份。"""
 
-    cutoff = now.astimezone(timezone.utc) - timedelta(days=retention_days)
     deleted_count = 0
     for lucky in luckies:
-        escaped_name = re.escape(lucky.safe_name)
-        filename_patterns = (
-            re.compile(rf"^lucky\.{escaped_name}\.\d{{8}}_\d{{6}}\.zip$"),
-            # 兼容改名前生成的历史备份，确保它们超过保留期后仍可清理。
-            re.compile(rf"^{escaped_name}_\d{{8}}_\d{{6}}\.zip$"),
-        )
+        candidates: list[tuple[datetime, str]] = []
         for remote_file in client.list_files(lucky.safe_name):
-            if not any(pattern.fullmatch(remote_file.name) for pattern in filename_patterns):
-                continue
-            if remote_file.modified_at is None:
-                continue
-            if remote_file.modified_at.astimezone(timezone.utc) >= cutoff:
-                continue
-            client.delete(lucky.safe_name, remote_file.name)
+            timestamp = backup_timestamp_from_filename(remote_file.name, lucky.safe_name)
+            if timestamp is not None:
+                candidates.append((timestamp, remote_file.name))
+
+        # 时间相同时再按文件名排序，保证每次清理结果稳定、可复现。
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        for _, filename in candidates[retention_count:]:
+            client.delete(lucky.safe_name, filename)
             deleted_count += 1
     return deleted_count
 
@@ -508,7 +547,7 @@ def build_notification(
         "",
         f"- 成功实例：{success_count}",
         f"- 失败实例：{failed_count}",
-        f"- 清理过期文件：{deleted_count}",
+        f"- 清理多余备份：{deleted_count}",
         f"- 总耗时：{elapsed_seconds:.1f} 秒",
         "",
         "### 实例结果",
@@ -518,7 +557,7 @@ def build_notification(
         icon = "✅" if result.success else "❌"
         lines.append(f"- {icon} **{result.name}**：{result.message}")
     if cleanup_error:
-        lines.extend(["", f"- ❌ **过期清理**：{cleanup_error}"])
+        lines.extend(["", f"- ❌ **备份清理**：{cleanup_error}"])
     return title, "\n".join(lines)
 
 
@@ -533,9 +572,12 @@ def run_task(
     started = time.monotonic()
     task_now = now or datetime.now().astimezone()
     timestamp = task_now.strftime("%Y%m%d_%H%M%S")
-    client = WebDAVClient(config.webdav, config.timeout_seconds)
+    clients = [
+        (webdav, WebDAVClient(webdav, config.timeout_seconds)) for webdav in config.webdavs
+    ]
     results: list[InstanceResult] = []
-    successful_uploads = 0
+    deleted_count = 0
+    cleanup_errors: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="lucky-backup-") as temp_dir:
         for lucky in config.luckies:
@@ -543,33 +585,68 @@ def run_task(
             try:
                 print(f"[开始] 正在备份 Lucky 实例：{lucky.name}")
                 size = download_lucky_backup(lucky, target, config.timeout_seconds)
-                remote_path = client.upload(lucky.safe_name, target.name, target.read_bytes())
-                successful_uploads += 1
-                message = f"已上传 {size} 字节到 {remote_path}"
-                results.append(InstanceResult(lucky.name, True, message, remote_path))
-                print(f"[成功] {lucky.name}：{message}")
             except BackupError as exc:
                 message = str(exc)
                 results.append(InstanceResult(lucky.name, False, message))
                 print(f"[失败] {lucky.name}：{message}")
+                continue
 
-    deleted_count = 0
-    cleanup_error: str | None = None
-    if successful_uploads > 0:
-        try:
-            deleted_count = cleanup_expired_backups(
-                client,
-                config.luckies,
-                config.retention_days,
-                task_now,
-            )
-            print(f"[清理] 已删除 {deleted_count} 个超过 {config.retention_days} 天的备份")
-        except BackupError as exc:
-            cleanup_error = str(exc)
-            print(f"[失败] 过期备份清理失败：{cleanup_error}")
-    else:
-        cleanup_error = "本轮没有成功上传的备份，已跳过远端清理"
-        print(f"[跳过] {cleanup_error}")
+            # 同一份下载结果复用到全部 WebDAV，避免重复请求 Lucky 备份接口。
+            backup_data = target.read_bytes()
+            uploaded_targets: list[str] = []
+            uploaded_paths: list[str] = []
+            uploaded_clients: list[tuple[WebDAVConfig, WebDAVClient]] = []
+            upload_errors: list[str] = []
+            for webdav, client in clients:
+                try:
+                    remote_path = client.upload(lucky.safe_name, target.name, backup_data)
+                    uploaded_targets.append(webdav.name)
+                    uploaded_paths.append(remote_path)
+                    uploaded_clients.append((webdav, client))
+                except BackupError as exc:
+                    upload_errors.append(f"{webdav.name}：{exc}")
+
+            # 当前 Lucky 的全部上传尝试结束后立即逐目标清理，再继续下一个 Lucky。
+            # 仅清理上传成功的目标；每个目标独立执行，失败时不回滚其他操作。
+            cleanup_summaries: list[str] = []
+            instance_cleanup_errors: list[str] = []
+            for webdav, client in uploaded_clients:
+                try:
+                    target_deleted_count = cleanup_excess_backups(
+                        client,
+                        (lucky,),
+                        config.retention_count,
+                    )
+                    deleted_count += target_deleted_count
+                    cleanup_summaries.append(f"{webdav.name} 删除 {target_deleted_count} 个")
+                    print(
+                        f"[清理] {lucky.name}/{webdav.name}："
+                        f"已删除 {target_deleted_count} 个多余备份，"
+                        f"保留最新 {config.retention_count} 个"
+                    )
+                except BackupError as exc:
+                    error = f"{lucky.name}/{webdav.name}：{exc}"
+                    instance_cleanup_errors.append(f"{webdav.name}：{exc}")
+                    cleanup_errors.append(error)
+                    print(f"[失败] 备份清理失败：{error}")
+
+            message_parts = [f"已下载 {size} 字节"]
+            if uploaded_targets:
+                message_parts.append(f"上传成功：{'、'.join(uploaded_targets)}")
+            if upload_errors:
+                message_parts.append(f"上传失败：{'；'.join(upload_errors)}")
+            if cleanup_summaries:
+                message_parts.append(f"清理完成：{'、'.join(cleanup_summaries)}")
+            if instance_cleanup_errors:
+                message_parts.append(f"清理失败：{'；'.join(instance_cleanup_errors)}")
+            message = "；".join(message_parts)
+            success = not upload_errors and not instance_cleanup_errors
+            first_remote_path = uploaded_paths[0] if uploaded_paths else None
+            results.append(InstanceResult(lucky.name, success, message, first_remote_path))
+            status = "成功" if success else "失败"
+            print(f"[{status}] {lucky.name}：{message}")
+
+    cleanup_error = "；".join(cleanup_errors) if cleanup_errors else None
 
     elapsed = time.monotonic() - started
     title, description = build_notification(results, deleted_count, cleanup_error, elapsed)

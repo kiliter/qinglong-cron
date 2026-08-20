@@ -1,6 +1,6 @@
 # 青龙定时任务订阅
 
-这是一个供青龙面板订阅的公开定时任务仓库。首个任务用于定期备份多个 Lucky 实例的配置，将备份上传到一个 WebDAV 服务，并通过青龙统一通知发送执行汇总。
+这是一个供青龙面板订阅的公开定时任务仓库。首个任务用于定期备份多个 Lucky 实例的配置，将备份上传到一个或多个 WebDAV 服务，并通过青龙统一通知发送执行汇总。
 
 ## 已提供任务
 
@@ -9,8 +9,8 @@
 - 每天凌晨 03:00 执行；
 - 支持配置多个 Lucky 实例；
 - 每个实例使用独立 OpenToken；
-- 所有实例共用一个 WebDAV 目标；
-- 远端仅保留最近 30 天的任务备份；
+- 支持同时上传到多个 WebDAV 目标；
+- 每个实例在远端仅保留最新 30 个任务备份；
 - 每次执行均通过青龙统一通知发送一条中文汇总；
 - 单个 Lucky 失败不会阻止其他实例继续备份；
 - 仅使用 Python 3 标准库，无需安装第三方依赖。
@@ -59,12 +59,15 @@
 | `luckies[].open_token` | 是 | 该实例的 OpenToken。 |
 | `luckies[].backup_api_path` | 否 | 备份接口，默认 `/api/configure`。 |
 | `luckies[].verify_ssl` | 否 | 是否校验 HTTPS 证书，默认 `true`。 |
-| `webdav.url` | 是 | WebDAV 服务地址，可包含服务自身的路径前缀。 |
-| `webdav.username` | 是 | WebDAV 用户名。 |
-| `webdav.password` | 是 | WebDAV 密码或应用专用密码。 |
-| `webdav.remote_root` | 否 | 任务远端根目录，默认 `/qinglong/lucky-backup`。 |
-| `webdav.verify_ssl` | 否 | 是否校验 WebDAV HTTPS 证书，默认 `true`。 |
-| `retention_days` | 否 | 保留天数，默认 `30`。 |
+| `webdavs` | 是 | WebDAV 目标数组，至少包含一个目标；旧版单个 `webdav` 对象仍兼容。 |
+| `webdavs[].name` | 否 | 目标显示名，用于日志和通知；默认按顺序生成。名称不得重复。 |
+| `webdavs[].url` | 是 | WebDAV 服务地址，可包含服务自身的路径前缀。 |
+| `webdavs[].username` | 是 | WebDAV 用户名。 |
+| `webdavs[].password` | 是 | WebDAV 密码或应用专用密码。 |
+| `webdavs[].remote_root` | 否 | 任务远端根目录，默认 `/qinglong/lucky-backup`。 |
+| `webdavs[].verify_ssl` | 否 | 是否校验 WebDAV HTTPS 证书，默认 `true`。 |
+| `retention_count` | 否 | 每个实例保留的最新备份数量，默认 `30`。 |
+| `retention_days` | 否 | 旧版兼容字段；未设置 `retention_count` 时，其值按保留数量解释。 |
 | `timeout_seconds` | 否 | 单次网络请求超时秒数，默认 `60`。 |
 
 `verify_ssl: false` 只适合使用自签名证书且暂时无法配置可信证书的内网服务。公网服务应保持 `true`。
@@ -77,13 +80,13 @@
 /qinglong/lucky-backup/<实例名称>/lucky.<实例名称>.YYYYMMDD_HHMMSS.zip
 ```
 
-清理功能只会删除任务根目录下同时满足以下条件的文件：
+每个 WebDAV 目标都会独立统计各实例目录中的文件，并删除超出 `retention_count` 数量的最旧备份。参与统计的文件必须同时满足以下条件：
 
 1. 位于已配置 Lucky 实例对应的子目录；
 2. 文件名严格符合本任务的命名格式；
-3. WebDAV 返回的修改时间早于当前时间 30 天以上。
+3. 文件名中的日期和时间合法，可用于确定备份先后顺序。
 
-清理程序同时兼容历史格式 `<实例名称>_YYYYMMDD_HHMMSS.zip`。手工文件、名称不匹配的文件以及无法取得修改时间的文件不会被删除；不存在的实例目录会被视为空目录。如果本轮所有 Lucky 备份均失败，任务会跳过远端清理。
+清理程序同时兼容历史格式 `<实例名称>_YYYYMMDD_HHMMSS.zip`。手工文件、名称不匹配的文件以及日期无效的文件不会被统计或删除；不存在的实例目录会被视为空目录。任务按 Lucky 串行执行：拉取一个 Lucky 的 ZIP，上传到全部 WebDAV，再分别清理该 Lucky 在上传成功目标中的目录，然后才处理下一个 Lucky。单个上传或清理失败不会回滚已完成操作，也不会阻止其他目标和 Lucky 继续执行，但任务最终会标记为部分失败。
 
 ## 青龙统一通知
 
