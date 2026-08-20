@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import threading
 import unittest
 import urllib.parse
@@ -14,8 +15,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 from xml.etree import ElementTree
+
+# 测试目录不再使用 __init__.py；显式加入项目根目录后，Python 会把 tasks 识别为命名空间包。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from tasks.lucky_webdav_backup import (
     ConfigError,

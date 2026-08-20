@@ -28,10 +28,10 @@
 | 链接 | `https://github.com/kiliter/qinglong-cron.git` |
 | 定时类型 | `crontab` |
 | 定时规则 | 可按需设置，例如每天更新一次订阅 |
-| 白名单 | `tasks/` |
+| 白名单 | `tasks/lucky_webdav_backup.py` |
 | 黑名单 | `tests/\|docs/\|examples/` |
 
-订阅完成后，青龙会从脚本注释读取任务名称和 Cron。任务默认规则为五段 Cron `0 3 * * *`，即每天凌晨 03:00。
+白名单必须填写完整任务路径，不要只填写 `tasks/`，否则青龙可能把目录中的其他 Python 文件也作为候选任务处理。订阅完成后，青龙会从脚本注释读取任务名称和 Cron。任务默认规则为五段 Cron `0 3 * * *`，即每天凌晨 03:00。
 
 ## Lucky 准备
 
