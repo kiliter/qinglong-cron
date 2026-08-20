@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-08-20-disable-brainstorming-design.md
+  s_603a75da2004cb::t_418cfd7a460614 1-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a83a10642748dc7351edb2395e1d1de2abd56817",
+  "prompts": {},
+  "sessions": {
+    "s_603a75da2004cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f51-35f3-7a70-8ce7-36f61f4b1828",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
