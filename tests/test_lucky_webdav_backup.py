@@ -65,6 +65,7 @@ class FakeQLAPI:
     """模拟青龙注入的 QLAPI，只记录统一通知调用。"""
 
     should_fail: bool = False
+    system_code: int = 200
     notifications: list[tuple[str, str]] = field(default_factory=list)
 
     def notify(self, title: str, content: str) -> None:
@@ -73,6 +74,17 @@ class FakeQLAPI:
         if self.should_fail:
             raise RuntimeError("模拟青龙通知失败")
         self.notifications.append((title, content))
+
+    def systemNotify(self, payload: dict[str, str]) -> dict[str, object]:  # noqa: N802
+        """模拟青龙系统通知，并返回可校验的发送状态。"""
+
+        if self.should_fail:
+            raise RuntimeError("模拟青龙系统通知失败")
+        self.notifications.append((payload["title"], payload["content"]))
+        return {
+            "code": self.system_code,
+            "message": "通知发送成功" if self.system_code == 200 else "无可用推送渠道",
+        }
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -535,12 +547,20 @@ class BackupTaskTests(unittest.TestCase):
             self.assertIn("配置备份失败", ql_api.notifications[0][1])
 
     def test_qinglong_notification_uses_injected_qlapi(self) -> None:
-        """默认通知适配器必须调用青龙注入的 QLAPI.notify。"""
+        """默认通知适配器必须调用青龙注入的 QLAPI.systemNotify。"""
 
         ql_api = FakeQLAPI()
         with mock.patch.object(backup_module, "QLAPI", ql_api, create=True):
             send_qinglong_notification("测试标题", "测试正文")
         self.assertEqual([("测试标题", "测试正文")], ql_api.notifications)
+
+    def test_qinglong_system_notification_rejects_failed_result(self) -> None:
+        """系统通知返回非成功状态时，不得把调用误报为发送成功。"""
+
+        ql_api = FakeQLAPI(system_code=500)
+        with mock.patch.object(backup_module, "QLAPI", ql_api, create=True):
+            with self.assertRaisesRegex(NotificationError, "无可用推送渠道"):
+                send_qinglong_notification("测试标题", "测试正文")
 
     def test_missing_qinglong_qlapi_is_reported(self) -> None:
         """脱离青龙运行时必须明确报告 QLAPI 不可用。"""

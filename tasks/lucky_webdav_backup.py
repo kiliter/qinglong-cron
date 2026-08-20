@@ -513,7 +513,7 @@ def cleanup_excess_backups(
 
 
 def send_qinglong_notification(title: str, description: str) -> None:
-    """调用青龙任务运行环境注入的 ``QLAPI.notify`` 发送汇总通知。"""
+    """优先通过 ``QLAPI.systemNotify`` 使用青龙面板配置的通知渠道。"""
 
     # 青龙会为 Python 任务注入 QLAPI；同时检查 builtins 以兼容不同运行器实现。
     ql_api = globals().get("QLAPI")
@@ -521,13 +521,27 @@ def send_qinglong_notification(title: str, description: str) -> None:
         import builtins
 
         ql_api = getattr(builtins, "QLAPI", None)
+    system_notify_method = getattr(ql_api, "systemNotify", None)
+    if callable(system_notify_method):
+        try:
+            result = system_notify_method({"title": title, "content": description})
+        except Exception as exc:  # noqa: BLE001 - 第三方运行器可能抛出任意异常类型。
+            raise NotificationError(f"青龙系统通知调用失败（{type(exc).__name__}）") from None
+        if not isinstance(result, dict) or str(result.get("code")) != "200":
+            # systemNotify 会返回明确状态，必须校验，避免把“调用完成”误报为“发送成功”。
+            result_message = result.get("message") if isinstance(result, dict) else None
+            detail = str(result_message or "未返回成功状态")
+            raise NotificationError(f"青龙系统通知发送失败：{detail}")
+        return
+
+    # 兼容尚未提供 systemNotify 的旧版青龙；该接口没有可靠的发送结果可供校验。
     notify_method = getattr(ql_api, "notify", None)
     if not callable(notify_method):
-        raise NotificationError("当前运行环境未提供青龙 QLAPI.notify")
+        raise NotificationError("当前运行环境未提供青龙 QLAPI.systemNotify 或 QLAPI.notify")
     try:
         notify_method(title, description)
     except Exception as exc:  # noqa: BLE001 - 第三方运行器可能抛出任意异常类型。
-        raise NotificationError(f"青龙通知调用失败（{type(exc).__name__}）") from None
+        raise NotificationError(f"青龙兼容通知调用失败（{type(exc).__name__}）") from None
 
 
 def build_notification(
@@ -654,7 +668,7 @@ def run_task(
     try:
         sender = notification_sender or send_qinglong_notification
         sender(title, description)
-        print("[通知] 青龙汇总通知调用成功")
+        print("[通知] 青龙汇总通知发送成功")
     except BackupError as exc:
         notification_error = str(exc)
         print(f"[失败] 青龙通知调用失败：{notification_error}")
@@ -680,7 +694,7 @@ def main() -> int:
                 "Lucky 备份配置错误",
                 f"## Lucky 配置备份失败\n\n- 配置错误：{exc}",
             )
-            print("[通知] 青龙配置错误通知调用成功")
+            print("[通知] 青龙配置错误通知发送成功")
         except BackupError as notify_exc:
             print(f"[失败] 青龙配置错误通知调用失败：{notify_exc}")
         return 1
