@@ -1,0 +1,30 @@
+{
+  "luckies": [
+    {
+      "name": "主路由",
+      "base_url": "https://lucky-router.example.com",
+      "open_token": "请替换为主路由的 OpenToken",
+      "backup_api_path": "/api/configure",
+      "verify_ssl": true
+    },
+    {
+      "name": "旁路由",
+      "base_url": "http://192.168.1.2:16601",
+      "open_token": "请替换为旁路由的 OpenToken",
+      "verify_ssl": true
+    }
+  ],
+  "webdav": {
+    "url": "https://dav.example.com/dav/user",
+    "username": "请替换为 WebDAV 用户名",
+    "password": "请替换为 WebDAV 密码",
+    "remote_root": "/qinglong/lucky-backup",
+    "verify_ssl": true
+  },
+  "serverchan": {
+    "send_key": "SCT_请替换为你的_Server酱_SendKey",
+    "verify_ssl": true
+  },
+  "retention_days": 30,
+  "timeout_seconds": 60
+}

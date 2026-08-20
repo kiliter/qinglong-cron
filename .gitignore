@@ -1,0 +1,12 @@
+# Python 运行缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地系统文件
+.DS_Store
+
+# 可能包含真实凭据的本地配置
+.env
+*.local.json
+config.json
