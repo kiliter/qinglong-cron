@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from xml.etree import ElementTree
 
 
@@ -51,6 +51,10 @@ class ConfigError(BackupError):
 
 class RequestError(BackupError):
     """远端 HTTP 请求失败。"""
+
+
+class NotificationError(BackupError):
+    """青龙内置通知调用失败。"""
 
 
 @dataclass(frozen=True)
@@ -77,21 +81,11 @@ class WebDAVConfig:
 
 
 @dataclass(frozen=True)
-class ServerChanConfig:
-    """Server酱配置；api_url 主要用于代理、自建网关和本地测试。"""
-
-    send_key: str
-    api_url: str | None = None
-    verify_ssl: bool = True
-
-
-@dataclass(frozen=True)
 class AppConfig:
     """一次任务运行所需的完整配置。"""
 
     luckies: tuple[LuckyConfig, ...]
     webdav: WebDAVConfig
-    serverchan: ServerChanConfig
     retention_days: int = DEFAULT_RETENTION_DAYS
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
@@ -224,19 +218,6 @@ def parse_config(raw: str) -> AppConfig:
         verify_ssl=_read_bool(webdav_obj, "verify_ssl", True, "webdav"),
     )
 
-    serverchan_obj = _require_mapping(root.get("serverchan"), "serverchan")
-    api_url_value = serverchan_obj.get("api_url")
-    if api_url_value is not None:
-        if not isinstance(api_url_value, str) or "{send_key}" not in api_url_value:
-            raise ConfigError("配置字段 serverchan.api_url 必须包含 {send_key} 占位符")
-        # 校验时先使用无敏感信息的占位值替换 SendKey。
-        _validate_http_url(api_url_value.replace("{send_key}", "TEST_SEND_KEY"), "serverchan.api_url")
-    serverchan = ServerChanConfig(
-        send_key=_require_string(serverchan_obj, "send_key", "serverchan"),
-        api_url=api_url_value,
-        verify_ssl=_read_bool(serverchan_obj, "verify_ssl", True, "serverchan"),
-    )
-
     retention_days = root.get("retention_days", DEFAULT_RETENTION_DAYS)
     if not isinstance(retention_days, int) or isinstance(retention_days, bool) or not 1 <= retention_days <= 3650:
         raise ConfigError("配置字段 retention_days 必须是 1 到 3650 之间的整数")
@@ -247,7 +228,6 @@ def parse_config(raw: str) -> AppConfig:
     return AppConfig(
         luckies=tuple(luckies),
         webdav=webdav,
-        serverchan=serverchan,
         retention_days=retention_days,
         timeout_seconds=timeout_seconds,
     )
@@ -285,7 +265,7 @@ def http_request(
                 raise RequestError(f"{method} 响应超过允许大小 {max_response_bytes} 字节")
             return response.status, dict(response.headers.items()), body
     except urllib.error.HTTPError as exc:
-        # 不把 exc 或 URL 原样写入错误，避免 Server酱 SendKey 出现在日志中。
+        # 不把 exc 或 URL 原样写入错误，避免远端地址中的敏感信息出现在日志中。
         raise RequestError(f"{method} 请求返回 HTTP {exc.code}") from None
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", None)
@@ -478,44 +458,22 @@ def cleanup_expired_backups(
     return deleted_count
 
 
-def serverchan_api_url(config: ServerChanConfig) -> str:
-    """按 SendKey 前缀选择 Server酱 Turbo 或 Server酱³ 端点。"""
+def send_qinglong_notification(title: str, description: str) -> None:
+    """调用青龙任务运行环境注入的 ``QLAPI.notify`` 发送汇总通知。"""
 
-    encoded_key = urllib.parse.quote(config.send_key, safe="")
-    if config.api_url:
-        return config.api_url.replace("{send_key}", encoded_key)
-    if config.send_key.startswith("sctp"):
-        match = re.match(r"^sctp(\d+)t", config.send_key)
-        if not match:
-            raise ConfigError("Server酱³ SendKey 格式不正确")
-        return f"https://{match.group(1)}.push.ft07.com/send/{encoded_key}.send"
-    return f"https://sctapi.ftqq.com/{encoded_key}.send"
+    # 青龙会为 Python 任务注入 QLAPI；同时检查 builtins 以兼容不同运行器实现。
+    ql_api = globals().get("QLAPI")
+    if ql_api is None:
+        import builtins
 
-
-def send_serverchan_notification(
-    config: ServerChanConfig,
-    title: str,
-    description: str,
-    timeout: int,
-) -> None:
-    """发送一次 Server酱通知，并校验业务响应码。"""
-
-    payload = urllib.parse.urlencode({"title": title[:32], "desp": description}).encode("utf-8")
-    _, _, body = http_request(
-        serverchan_api_url(config),
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
-        data=payload,
-        timeout=timeout,
-        verify_ssl=config.verify_ssl,
-        max_response_bytes=1024 * 1024,
-    )
+        ql_api = getattr(builtins, "QLAPI", None)
+    notify_method = getattr(ql_api, "notify", None)
+    if not callable(notify_method):
+        raise NotificationError("当前运行环境未提供青龙 QLAPI.notify")
     try:
-        response = json.loads(body)
-    except json.JSONDecodeError:
-        raise RequestError("Server酱返回内容不是有效 JSON") from None
-    if not isinstance(response, dict) or response.get("code") != 0:
-        raise RequestError("Server酱返回业务失败状态")
+        notify_method(title, description)
+    except Exception as exc:  # noqa: BLE001 - 第三方运行器可能抛出任意异常类型。
+        raise NotificationError(f"青龙通知调用失败（{type(exc).__name__}）") from None
 
 
 def build_notification(
@@ -549,7 +507,12 @@ def build_notification(
     return title, "\n".join(lines)
 
 
-def run_task(config: AppConfig, *, now: datetime | None = None) -> int:
+def run_task(
+    config: AppConfig,
+    *,
+    now: datetime | None = None,
+    notification_sender: Callable[[str, str], None] | None = None,
+) -> int:
     """执行完整备份流程，返回供青龙识别的进程退出码。"""
 
     started = time.monotonic()
@@ -597,55 +560,18 @@ def run_task(config: AppConfig, *, now: datetime | None = None) -> int:
     title, description = build_notification(results, deleted_count, cleanup_error, elapsed)
     notification_error: str | None = None
     try:
-        send_serverchan_notification(
-            config.serverchan,
-            title,
-            description,
-            config.timeout_seconds,
-        )
-        print("[通知] Server酱汇总通知发送成功")
+        sender = notification_sender or send_qinglong_notification
+        sender(title, description)
+        print("[通知] 青龙汇总通知调用成功")
     except BackupError as exc:
         notification_error = str(exc)
-        print(f"[失败] Server酱通知发送失败：{notification_error}")
+        print(f"[失败] 青龙通知调用失败：{notification_error}")
+    except Exception as exc:  # noqa: BLE001 - 兼容测试注入及自定义通知适配器。
+        notification_error = f"青龙通知调用失败（{type(exc).__name__}）"
+        print(f"[失败] 青龙通知调用失败：{notification_error}")
 
     has_instance_failure = any(not result.success for result in results)
     return 1 if has_instance_failure or cleanup_error or notification_error else 0
-
-
-def parse_serverchan_for_config_error(raw: str) -> tuple[ServerChanConfig, int] | None:
-    """在主配置无效时，尽量独立提取 Server酱配置用于发送错误通知。"""
-
-    try:
-        root = json.loads(raw)
-        if not isinstance(root, dict):
-            return None
-        serverchan_obj = root.get("serverchan")
-        if not isinstance(serverchan_obj, dict):
-            return None
-        send_key = serverchan_obj.get("send_key")
-        if not isinstance(send_key, str) or not send_key.strip():
-            return None
-        api_url = serverchan_obj.get("api_url")
-        if api_url is not None and (
-            not isinstance(api_url, str) or "{send_key}" not in api_url
-        ):
-            return None
-        verify_ssl = serverchan_obj.get("verify_ssl", True)
-        if not isinstance(verify_ssl, bool):
-            return None
-        timeout = root.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
-            timeout = DEFAULT_TIMEOUT_SECONDS
-        return (
-            ServerChanConfig(
-                send_key=send_key.strip(),
-                api_url=api_url,
-                verify_ssl=verify_ssl,
-            ),
-            timeout,
-        )
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
 
 
 def main() -> int:
@@ -656,20 +582,15 @@ def main() -> int:
         config = parse_config(raw_config)
     except ConfigError as exc:
         print(f"[配置错误] {exc}")
-        # 主配置失败时不进行任何备份或清理，但若能安全提取 SendKey，仍发送一次汇总。
-        notification_config = parse_serverchan_for_config_error(raw_config)
-        if notification_config is not None:
-            serverchan, timeout = notification_config
-            try:
-                send_serverchan_notification(
-                    serverchan,
-                    "Lucky 备份配置错误",
-                    f"## Lucky 配置备份失败\n\n- 配置错误：{exc}",
-                    timeout,
-                )
-                print("[通知] Server酱配置错误通知发送成功")
-            except BackupError as notify_exc:
-                print(f"[失败] Server酱配置错误通知发送失败：{notify_exc}")
+        # 主配置失败时不进行备份或清理，但仍尽最大努力调用青龙的统一通知。
+        try:
+            send_qinglong_notification(
+                "Lucky 备份配置错误",
+                f"## Lucky 配置备份失败\n\n- 配置错误：{exc}",
+            )
+            print("[通知] 青龙配置错误通知调用成功")
+        except BackupError as notify_exc:
+            print(f"[失败] 青龙配置错误通知调用失败：{notify_exc}")
         return 1
     return run_task(config)
 

@@ -1,6 +1,6 @@
 # 青龙定时任务订阅
 
-这是一个供青龙面板订阅的公开定时任务仓库。首个任务用于定期备份多个 Lucky 实例的配置，将备份上传到一个 WebDAV 服务，并通过 Server酱发送执行汇总。
+这是一个供青龙面板订阅的公开定时任务仓库。首个任务用于定期备份多个 Lucky 实例的配置，将备份上传到一个 WebDAV 服务，并通过青龙统一通知发送执行汇总。
 
 ## 已提供任务
 
@@ -11,7 +11,7 @@
 - 每个实例使用独立 OpenToken；
 - 所有实例共用一个 WebDAV 目标；
 - 远端仅保留最近 30 天的任务备份；
-- 每次执行均发送一条 Server酱中文汇总；
+- 每次执行均通过青龙统一通知发送一条中文汇总；
 - 单个 Lucky 失败不会阻止其他实例继续备份；
 - 仅使用 Python 3 标准库，无需安装第三方依赖。
 
@@ -64,8 +64,6 @@
 | `webdav.password` | 是 | WebDAV 密码或应用专用密码。 |
 | `webdav.remote_root` | 否 | 任务远端根目录，默认 `/qinglong/lucky-backup`。 |
 | `webdav.verify_ssl` | 否 | 是否校验 WebDAV HTTPS 证书，默认 `true`。 |
-| `serverchan.send_key` | 是 | Server酱 SendKey，支持 `SCT` 和 `sctp` 两类。 |
-| `serverchan.verify_ssl` | 否 | 是否校验 Server酱 HTTPS 证书，默认 `true`。 |
 | `retention_days` | 否 | 保留天数，默认 `30`。 |
 | `timeout_seconds` | 否 | 单次网络请求超时秒数，默认 `60`。 |
 
@@ -87,17 +85,18 @@
 
 手工文件、名称不匹配的文件以及无法取得修改时间的文件不会被删除。如果本轮所有 Lucky 备份均失败，任务会跳过远端清理。
 
-## Server酱通知
+## 青龙统一通知
 
-任务每次运行只合并发送一条通知，包含各实例的成功或失败状态、清理数量和总耗时。
+任务每次运行只调用一次青龙内置的 `QLAPI.notify`，通知包含各实例的成功或失败状态、清理数量和总耗时。
 
-- `SCT` 开头的 SendKey 自动使用 Server酱 Turbo；
-- `sctp` 开头的 SendKey 自动使用 Server酱³；
-- 通知与任务日志不会输出 OpenToken、WebDAV 密码或完整 SendKey。
+- 通知渠道和密钥统一在青龙“系统设置 → 通知设置”中维护；
+- 可在青龙中选择 Server酱或其他已支持的通知渠道；
+- `LUCKY_BACKUP_CONFIG` 不再需要填写 Server酱 SendKey；
+- 通知与任务日志不会输出 OpenToken 或 WebDAV 密码。
 
 ## 手动测试
 
-配置环境变量后，可在青龙面板中手动运行任务，也可以在项目目录执行：
+配置环境变量后，应在青龙面板中手动运行任务。脚本也可以在项目目录直接执行，但普通 Python 环境没有青龙注入的 `QLAPI`，通知阶段会明确报错并返回失败状态：
 
 ```bash
 python3 tasks/lucky_webdav_backup.py
@@ -109,11 +108,11 @@ python3 tasks/lucky_webdav_backup.py
 python3 -m unittest discover -s tests -v
 ```
 
-测试全部使用本地模拟服务，不会访问真实 Lucky、WebDAV 或 Server酱。
+测试使用本地模拟 Lucky、WebDAV 服务和模拟 `QLAPI`，不会访问真实服务或通知渠道。
 
 ## 安全提示
 
 - 不要把真实配置保存到仓库；
 - 不要在 Issue、日志截图或聊天记录中公开任何 Token 或密码；
-- OpenToken 或 SendKey 泄露后应立即在对应后台重置；
+- OpenToken 或青龙通知密钥泄露后应立即在对应后台重置；
 - 建议为 WebDAV 使用仅能访问备份目录的独立账号。

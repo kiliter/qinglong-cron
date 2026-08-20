@@ -24,14 +24,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import tasks.lucky_webdav_backup as backup_module
 from tasks.lucky_webdav_backup import (
     ConfigError,
     CONFIG_ENV_NAME,
     main,
+    NotificationError,
     parse_config,
     run_task,
-    serverchan_api_url,
-    ServerChanConfig,
+    send_qinglong_notification,
 )
 
 
@@ -53,13 +54,26 @@ class MockState:
     remote_files: dict[str, list[tuple[str, str | None]]] = field(default_factory=dict)
     collections: set[str] = field(default_factory=set)
     deleted_paths: list[str] = field(default_factory=list)
-    notifications: list[dict[str, list[str]]] = field(default_factory=list)
     received_tokens: list[str | None] = field(default_factory=list)
-    notification_code: int = 0
+
+
+@dataclass
+class FakeQLAPI:
+    """模拟青龙注入的 QLAPI，只记录统一通知调用。"""
+
+    should_fail: bool = False
+    notifications: list[tuple[str, str]] = field(default_factory=list)
+
+    def notify(self, title: str, content: str) -> None:
+        """记录通知；按测试需要模拟青龙通知调用异常。"""
+
+        if self.should_fail:
+            raise RuntimeError("模拟青龙通知失败")
+        self.notifications.append((title, content))
 
 
 class MockHandler(BaseHTTPRequestHandler):
-    """同时模拟 Lucky、WebDAV 和 Server酱端点。"""
+    """同时模拟 Lucky 和 WebDAV 端点。"""
 
     server: "MockHTTPServer"
 
@@ -130,14 +144,6 @@ class MockHandler(BaseHTTPRequestHandler):
         self.server.state.deleted_paths.append(path)
         self._send(204)
 
-    def do_POST(self) -> None:  # noqa: N802 - HTTPServer 约定的方法名称。
-        size = int(self.headers.get("Content-Length", "0"))
-        payload = urllib.parse.parse_qs(self.rfile.read(size).decode("utf-8"))
-        self.server.state.notifications.append(payload)
-        response = {"code": self.server.state.notification_code}
-        self._send(200, json.dumps(response).encode("utf-8"), "application/json")
-
-
 class MockHTTPServer(ThreadingHTTPServer):
     """携带测试状态的线程 HTTP 服务。"""
 
@@ -195,10 +201,6 @@ def make_config(base_url: str, *, include_failed_lucky: bool = False) -> str:
                 "password": "DAV_PASSWORD_SECRET",
                 "remote_root": "/qinglong/lucky-backup",
             },
-            "serverchan": {
-                "send_key": "SCT_TEST_SECRET",
-                "api_url": f"{base_url}/notify/{{send_key}}.send",
-            },
             "retention_days": 30,
             "timeout_seconds": 5,
         },
@@ -214,6 +216,7 @@ class BackupTaskTests(unittest.TestCase):
 
         with MockServices() as services:
             state = services.state
+            ql_api = FakeQLAPI()
             state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip())
             directory = "/dav/qinglong/lucky-backup/主路由"
             state.remote_files[directory] = [
@@ -224,7 +227,11 @@ class BackupTaskTests(unittest.TestCase):
             ]
 
             config = parse_config(make_config(services.base_url))
-            exit_code = run_task(config, now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc))
+            exit_code = run_task(
+                config,
+                now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                notification_sender=ql_api.notify,
+            )
 
             self.assertEqual(0, exit_code)
             uploaded_paths = list(state.uploads)
@@ -235,26 +242,31 @@ class BackupTaskTests(unittest.TestCase):
                 state.deleted_paths,
             )
             self.assertEqual(["TOKEN_MAIN_SECRET"], state.received_tokens)
-            self.assertEqual(1, len(state.notifications))
-            self.assertIn("Lucky 配置备份成功", state.notifications[0]["desp"][0])
+            self.assertEqual(1, len(ql_api.notifications))
+            self.assertIn("Lucky 配置备份成功", ql_api.notifications[0][1])
 
     def test_one_lucky_failure_does_not_stop_other_instances(self) -> None:
         """一个 Lucky 返回 HTML 时，成功实例仍上传且最终返回失败状态。"""
 
         with MockServices() as services:
             state = services.state
+            ql_api = FakeQLAPI()
             state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip("主路由"))
             state.lucky_responses["/lucky-side/api/configure"] = (200, b"<html>login</html>")
             config = parse_config(make_config(services.base_url, include_failed_lucky=True))
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                exit_code = run_task(config, now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc))
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
 
             self.assertEqual(1, exit_code)
             self.assertEqual(1, len(state.uploads))
-            self.assertEqual(1, len(state.notifications))
-            notice = state.notifications[0]["desp"][0]
+            self.assertEqual(1, len(ql_api.notifications))
+            notice = ql_api.notifications[0][1]
             self.assertIn("旁路由", notice)
             self.assertIn("内容不是 ZIP", notice)
 
@@ -264,7 +276,6 @@ class BackupTaskTests(unittest.TestCase):
                 "TOKEN_MAIN_SECRET",
                 "TOKEN_SIDE_SECRET",
                 "DAV_PASSWORD_SECRET",
-                "SCT_TEST_SECRET",
             ):
                 self.assertNotIn(secret, combined_text)
 
@@ -274,26 +285,35 @@ class BackupTaskTests(unittest.TestCase):
         with MockServices() as services:
             services.state.lucky_responses["/lucky-main/api/configure"] = (500, b"error")
             config = parse_config(make_config(services.base_url))
+            ql_api = FakeQLAPI()
             with contextlib.redirect_stdout(io.StringIO()):
-                exit_code = run_task(config, now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc))
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
 
             self.assertEqual(1, exit_code)
             self.assertEqual([], services.state.deleted_paths)
-            self.assertEqual(1, len(services.state.notifications))
+            self.assertEqual(1, len(ql_api.notifications))
 
-    def test_serverchan_business_failure_marks_task_failed(self) -> None:
-        """Server酱返回非零业务码时，即使备份成功也必须返回失败状态。"""
+    def test_qinglong_notification_failure_marks_task_failed(self) -> None:
+        """青龙通知调用异常时，即使备份成功也必须返回失败状态。"""
 
         with MockServices() as services:
             services.state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip())
-            services.state.notification_code = 1
             config = parse_config(make_config(services.base_url))
+            ql_api = FakeQLAPI(should_fail=True)
             with contextlib.redirect_stdout(io.StringIO()):
-                exit_code = run_task(config, now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc))
+                exit_code = run_task(
+                    config,
+                    now=datetime(2026, 8, 20, 3, tzinfo=timezone.utc),
+                    notification_sender=ql_api.notify,
+                )
 
             self.assertEqual(1, exit_code)
             self.assertEqual(1, len(services.state.uploads))
-            self.assertEqual(1, len(services.state.notifications))
+            self.assertEqual(0, len(ql_api.notifications))
 
     def test_duplicate_safe_names_are_rejected(self) -> None:
         """不同显示名若映射为同一目录名，应在网络操作前拒绝。"""
@@ -306,35 +326,37 @@ class BackupTaskTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_config(json.dumps(raw))
 
-    def test_invalid_main_config_still_sends_serverchan_notification(self) -> None:
-        """主配置不合法但 SendKey 可读取时，仍应发送一次配置错误通知。"""
+    def test_invalid_main_config_still_sends_qinglong_notification(self) -> None:
+        """主配置不合法时，仍应通过青龙 QLAPI 发送一次配置错误通知。"""
 
         with MockServices() as services:
             raw = json.loads(make_config(services.base_url))
             raw["luckies"] = []
-            with mock.patch.dict(os.environ, {CONFIG_ENV_NAME: json.dumps(raw)}, clear=False):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    exit_code = main()
+            ql_api = FakeQLAPI()
+            with mock.patch.object(backup_module, "QLAPI", ql_api, create=True):
+                with mock.patch.dict(os.environ, {CONFIG_ENV_NAME: json.dumps(raw)}, clear=False):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        exit_code = main()
 
             self.assertEqual(1, exit_code)
             self.assertEqual({}, services.state.uploads)
-            self.assertEqual(1, len(services.state.notifications))
-            self.assertIn("配置备份失败", services.state.notifications[0]["desp"][0])
+            self.assertEqual(1, len(ql_api.notifications))
+            self.assertIn("配置备份失败", ql_api.notifications[0][1])
 
-    def test_serverchan_sc3_endpoint_is_selected_by_prefix(self) -> None:
-        """sctp 前缀必须自动切换到 Server酱³ 用户域名。"""
+    def test_qinglong_notification_uses_injected_qlapi(self) -> None:
+        """默认通知适配器必须调用青龙注入的 QLAPI.notify。"""
 
-        config = ServerChanConfig(send_key="sctp123tABC")
-        self.assertEqual(
-            "https://123.push.ft07.com/send/sctp123tABC.send",
-            serverchan_api_url(config),
-        )
+        ql_api = FakeQLAPI()
+        with mock.patch.object(backup_module, "QLAPI", ql_api, create=True):
+            send_qinglong_notification("测试标题", "测试正文")
+        self.assertEqual([("测试标题", "测试正文")], ql_api.notifications)
 
-    def test_invalid_sc3_send_key_is_rejected(self) -> None:
-        """格式错误的 Server酱³ SendKey 不得发往未知地址。"""
+    def test_missing_qinglong_qlapi_is_reported(self) -> None:
+        """脱离青龙运行时必须明确报告 QLAPI 不可用。"""
 
-        with self.assertRaises(ConfigError):
-            serverchan_api_url(ServerChanConfig(send_key="sctp-invalid"))
+        with mock.patch.object(backup_module, "QLAPI", None, create=True):
+            with self.assertRaises(NotificationError):
+                send_qinglong_notification("测试标题", "测试正文")
 
 
 if __name__ == "__main__":

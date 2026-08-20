@@ -21,10 +21,6 @@
     "remote_root": "/qinglong/lucky-backup",
     "verify_ssl": true
   },
-  "serverchan": {
-    "send_key": "SCT_请替换为你的_Server酱_SendKey",
-    "verify_ssl": true
-  },
   "retention_days": 30,
   "timeout_seconds": 60
 }
