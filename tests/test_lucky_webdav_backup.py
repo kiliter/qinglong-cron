@@ -54,6 +54,7 @@ class MockState:
     remote_files: dict[str, list[tuple[str, str | None]]] = field(default_factory=dict)
     collections: set[str] = field(default_factory=set)
     deleted_paths: list[str] = field(default_factory=list)
+    missing_collections: set[str] = field(default_factory=set)
     received_tokens: list[str | None] = field(default_factory=list)
 
 
@@ -117,6 +118,10 @@ class MockHandler(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length", "0"))
         if size:
             self.rfile.read(size)
+
+        if path in state.missing_collections:
+            self._send(404)
+            return
 
         root = ElementTree.Element("{DAV:}multistatus")
         directory_response = ElementTree.SubElement(root, "{DAV:}response")
@@ -220,10 +225,11 @@ class BackupTaskTests(unittest.TestCase):
             state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip())
             directory = "/dav/qinglong/lucky-backup/主路由"
             state.remote_files[directory] = [
-                ("主路由_20260601_030000.zip", format_datetime(datetime(2026, 6, 1, tzinfo=timezone.utc))),
-                ("主路由_20260810_030000.zip", format_datetime(datetime(2026, 8, 10, tzinfo=timezone.utc))),
+                ("lucky.主路由.20260601_030000.zip", format_datetime(datetime(2026, 6, 1, tzinfo=timezone.utc))),
+                ("主路由_20260602_030000.zip", format_datetime(datetime(2026, 6, 2, tzinfo=timezone.utc))),
+                ("lucky.主路由.20260810_030000.zip", format_datetime(datetime(2026, 8, 10, tzinfo=timezone.utc))),
                 ("手工备份.zip", format_datetime(datetime(2026, 1, 1, tzinfo=timezone.utc))),
-                ("主路由_20260501_030000.zip", None),
+                ("lucky.主路由.20260501_030000.zip", None),
             ]
 
             config = parse_config(make_config(services.base_url))
@@ -236,10 +242,13 @@ class BackupTaskTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             uploaded_paths = list(state.uploads)
             self.assertEqual(1, len(uploaded_paths))
-            self.assertTrue(uploaded_paths[0].endswith("主路由_20260820_030000.zip"))
+            self.assertTrue(uploaded_paths[0].endswith("lucky.主路由.20260820_030000.zip"))
             self.assertEqual(
-                ["/dav/qinglong/lucky-backup/主路由/主路由_20260601_030000.zip"],
-                state.deleted_paths,
+                {
+                    "/dav/qinglong/lucky-backup/主路由/lucky.主路由.20260601_030000.zip",
+                    "/dav/qinglong/lucky-backup/主路由/主路由_20260602_030000.zip",
+                },
+                set(state.deleted_paths),
             )
             self.assertEqual(["TOKEN_MAIN_SECRET"], state.received_tokens)
             self.assertEqual(1, len(ql_api.notifications))
@@ -254,6 +263,9 @@ class BackupTaskTests(unittest.TestCase):
             state.lucky_responses["/lucky-main/api/configure"] = (200, make_zip("主路由"))
             state.lucky_responses["/lucky-side/api/configure"] = (200, b"<html>login</html>")
             config = parse_config(make_config(services.base_url, include_failed_lucky=True))
+            # 失败实例从未上传过时，WebDAV 中可能没有对应目录。
+            missing_directory = "/dav/qinglong/lucky-backup/旁路由"
+            state.missing_collections.add(missing_directory)
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -269,6 +281,8 @@ class BackupTaskTests(unittest.TestCase):
             notice = ql_api.notifications[0][1]
             self.assertIn("旁路由", notice)
             self.assertIn("内容不是 ZIP", notice)
+            self.assertNotIn("过期备份清理失败", output.getvalue())
+            self.assertNotIn("❌ **过期清理**", notice)
 
             # 日志与通知都不得暴露三类真实凭据。
             combined_text = output.getvalue() + notice

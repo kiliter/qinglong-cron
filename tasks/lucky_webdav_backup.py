@@ -294,6 +294,12 @@ def lucky_backup_url(config: LuckyConfig) -> str:
     return join_url(config.base_url, config.backup_api_path)
 
 
+def backup_filename(instance_name: str, timestamp: str) -> str:
+    """按统一格式生成备份文件名，并保留完整执行时间以避免同日覆盖。"""
+
+    return f"lucky.{instance_name}.{timestamp}.zip"
+
+
 def download_lucky_backup(config: LuckyConfig, target: Path, timeout: int) -> int:
     """下载并验证 Lucky ZIP 备份，成功时返回文件字节数。"""
 
@@ -381,15 +387,21 @@ class WebDAVClient:
 
         request_body = b"""<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getlastmodified/></d:prop></d:propfind>"""
-        _, _, body = http_request(
-            self.url_for(instance_name),
-            method="PROPFIND",
-            headers=self._headers({"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}),
-            data=request_body,
-            timeout=self.timeout,
-            verify_ssl=self.config.verify_ssl,
-            max_response_bytes=10 * 1024 * 1024,
-        )
+        try:
+            _, _, body = http_request(
+                self.url_for(instance_name),
+                method="PROPFIND",
+                headers=self._headers({"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}),
+                data=request_body,
+                timeout=self.timeout,
+                verify_ssl=self.config.verify_ssl,
+                max_response_bytes=10 * 1024 * 1024,
+            )
+        except RequestError as exc:
+            # 部分实例从未成功上传时，其远端目录尚不存在；404 等同于空目录。
+            if str(exc) == "PROPFIND 请求返回 HTTP 404":
+                return []
+            raise
         try:
             root = ElementTree.fromstring(body)
         except ElementTree.ParseError:
@@ -443,11 +455,14 @@ def cleanup_expired_backups(
     cutoff = now.astimezone(timezone.utc) - timedelta(days=retention_days)
     deleted_count = 0
     for lucky in luckies:
-        filename_pattern = re.compile(
-            rf"^{re.escape(lucky.safe_name)}_\d{{8}}_\d{{6}}\.zip$"
+        escaped_name = re.escape(lucky.safe_name)
+        filename_patterns = (
+            re.compile(rf"^lucky\.{escaped_name}\.\d{{8}}_\d{{6}}\.zip$"),
+            # 兼容改名前生成的历史备份，确保它们超过保留期后仍可清理。
+            re.compile(rf"^{escaped_name}_\d{{8}}_\d{{6}}\.zip$"),
         )
         for remote_file in client.list_files(lucky.safe_name):
-            if not filename_pattern.fullmatch(remote_file.name):
+            if not any(pattern.fullmatch(remote_file.name) for pattern in filename_patterns):
                 continue
             if remote_file.modified_at is None:
                 continue
@@ -524,7 +539,7 @@ def run_task(
 
     with tempfile.TemporaryDirectory(prefix="lucky-backup-") as temp_dir:
         for lucky in config.luckies:
-            target = Path(temp_dir) / f"{lucky.safe_name}_{timestamp}.zip"
+            target = Path(temp_dir) / backup_filename(lucky.safe_name, timestamp)
             try:
                 print(f"[开始] 正在备份 Lucky 实例：{lucky.name}")
                 size = download_lucky_backup(lucky, target, config.timeout_seconds)
