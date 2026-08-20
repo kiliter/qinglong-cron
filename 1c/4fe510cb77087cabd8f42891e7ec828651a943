@@ -1,0 +1,14 @@
+docs/superpowers/specs/2026-08-20-lucky-webdav-backup-design.md
+  h_b1099757fa8f7e 1-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "1c4fe510cb77087cabd8f42891e7ec828651a943",
+  "prompts": {},
+  "humans": {
+    "h_b1099757fa8f7e": {
+      "author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
