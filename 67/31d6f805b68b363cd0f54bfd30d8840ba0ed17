@@ -1,0 +1,28 @@
+tests/test_lucky_webdav_backup.py
+  s_603a75da2004cb::t_d30d1f53f58c73 68,78-88,550,557-563
+  s_603a75da2004cb::t_ad3a1c6e9ee035 564
+tasks/lucky_webdav_backup.py
+  s_603a75da2004cb::t_d30d1f53f58c73 516,524-537,540,544,671
+  s_603a75da2004cb::t_b4e10ad24f5806 697
+README.md
+  s_603a75da2004cb::t_d30d1f53f58c73 93
+docs/superpowers/specs/2026-08-20-lucky-webdav-backup-design.md
+  s_603a75da2004cb::t_b4e10ad24f5806 91
+  s_603a75da2004cb::t_d30d1f53f58c73 60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6731d6f805b68b363cd0f54bfd30d8840ba0ed17",
+  "prompts": {},
+  "sessions": {
+    "s_603a75da2004cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f51-35f3-7a70-8ce7-36f61f4b1828",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
