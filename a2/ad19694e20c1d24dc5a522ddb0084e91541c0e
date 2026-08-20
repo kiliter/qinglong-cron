@@ -1,0 +1,19 @@
+AGENTS.md
+  s_603a75da2004cb::t_4bf44309479770 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a2ad19694e20c1d24dc5a522ddb0084e91541c0e",
+  "prompts": {},
+  "sessions": {
+    "s_603a75da2004cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f51-35f3-7a70-8ce7-36f61f4b1828",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
