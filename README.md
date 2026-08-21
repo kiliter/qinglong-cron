@@ -1,6 +1,6 @@
 # 青龙定时任务订阅
 
-这是一个供青龙面板订阅的公开定时任务仓库。首个任务用于定期备份多个 Lucky 实例的配置，将备份上传到一个或多个 WebDAV 服务，并通过青龙统一通知发送执行汇总。
+这是一个供青龙面板订阅的公开定时任务仓库，提供 Lucky 配置备份和独立的 WebDAV 备份多目标同步任务，并通过青龙统一通知发送执行汇总。
 
 ## 已提供任务
 
@@ -17,6 +17,20 @@
 
 任务脚本：[`tasks/lucky_webdav_backup.py`](tasks/lucky_webdav_backup.py)
 
+### WebDAV 备份多目标同步
+
+- 默认每天凌晨 02:10 执行；
+- 支持 N 组独立的 `source -> targets` 配置；
+- 每组只读取源端最新一个 MoviePilot 备份；
+- 目标存在同名文件时直接跳过，不执行上传或清理；
+- 目标不存在时下载源文件一次，复用上传到所有缺失目标，上传成功后再清理；
+- 单个目标或同步组失败不会阻止其他目标和组；
+- 与 Lucky 备份脚本完全独立，仅使用 Python 3 标准库。
+
+任务脚本：[`tasks/webdav_backup_sync.py`](tasks/webdav_backup_sync.py)
+
+配置说明：[`docs/webdav-backup-sync.md`](docs/webdav-backup-sync.md)
+
 ## 青龙订阅
 
 在青龙面板的“订阅管理”中新增订阅：
@@ -28,10 +42,10 @@
 | 链接 | `https://github.com/kiliter/qinglong-cron.git` |
 | 定时类型 | `crontab` |
 | 定时规则 | 可按需设置，例如每天更新一次订阅 |
-| 白名单 | `tasks/lucky_webdav_backup.py` |
+| 白名单 | `tasks/lucky_webdav_backup.py\|tasks/webdav_backup_sync.py` |
 | 黑名单 | `tests/\|docs/\|examples/` |
 
-白名单必须填写完整任务路径，不要只填写 `tasks/`，否则青龙可能把目录中的其他 Python 文件也作为候选任务处理。订阅完成后，青龙会从脚本注释读取任务名称和 Cron。任务默认规则为五段 Cron `0 3 * * *`，即每天凌晨 03:00。
+白名单必须填写完整任务路径，不要只填写 `tasks/`，否则青龙可能把目录中的其他 Python 文件也作为候选任务处理。如只需要其中一个任务，可只保留对应文件路径。订阅完成后，青龙会从脚本注释读取各自的任务名称和 Cron。
 
 ## Lucky 准备
 

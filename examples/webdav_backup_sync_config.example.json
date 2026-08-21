@@ -1,0 +1,60 @@
+{
+  "groups": [
+    {
+      "name": "MoviePilot 主实例",
+      "source": {
+        "name": "MoviePilot 源存储",
+        "url": "https://source-dav.example.com/dav/user",
+        "username": "请替换为源 WebDAV 用户名",
+        "password": "请替换为源 WebDAV 密码",
+        "remote_root": "/moviepilot-backup",
+        "verify_ssl": true
+      },
+      "targets": [
+        {
+          "name": "异地存储 A",
+          "url": "https://target-a.example.com/dav/user",
+          "username": "请替换为目标 A 用户名",
+          "password": "请替换为目标 A 密码",
+          "remote_root": "/moviepilot-backup",
+          "verify_ssl": true
+        },
+        {
+          "name": "异地存储 B",
+          "url": "https://target-b.example.com/dav/user",
+          "username": "请替换为目标 B 用户名",
+          "password": "请替换为目标 B 密码",
+          "remote_root": "/moviepilot-backup",
+          "verify_ssl": true
+        }
+      ],
+      "retention_count": 10,
+      "filename_prefix": "MoviePilot-Backup-"
+    },
+    {
+      "name": "MoviePilot 副实例",
+      "source": {
+        "name": "副实例源存储",
+        "url": "https://source-2.example.com/webdav",
+        "username": "请替换为第二组源端用户名",
+        "password": "请替换为第二组源端密码",
+        "remote_root": "/backup",
+        "verify_ssl": true
+      },
+      "targets": [
+        {
+          "name": "副实例异地存储",
+          "url": "https://target-2.example.com/webdav",
+          "username": "请替换为第二组目标端用户名",
+          "password": "请替换为第二组目标端密码",
+          "remote_root": "/backup",
+          "verify_ssl": true
+        }
+      ],
+      "retention_count": 5,
+      "filename_prefix": "MoviePilot-Backup-"
+    }
+  ],
+  "timeout_seconds": 60,
+  "max_backup_mb": 512
+}
