@@ -1,0 +1,32 @@
+docs/webdav-backup-sync.md
+  s_603a75da2004cb::t_0d532ef5037755 1-110
+examples/webdav_backup_sync_config.example.json
+  s_603a75da2004cb::t_364e184ee19d6c 1-60
+tasks/webdav_backup_sync.py
+  s_603a75da2004cb::t_314293fabb2f7f 570-573
+  s_603a75da2004cb::t_43d5e727d042f3 559-562,567
+  s_603a75da2004cb::t_15bb6cefc018f1 1-502,504-516,518-520,523-529,531-535,544-547,551-556,558,565,574,576-577,579-581,585-705
+  s_603a75da2004cb::t_f5b9f0903797b8 503,517,521-522,530,536-543,548-550,557,563-564,566,568-569,575,578,582-584
+README.md
+  s_603a75da2004cb::t_0d532ef5037755 3,20-29,32-33,45,48
+  s_603a75da2004cb::t_a15fe55eb28bbb 30-31
+tests/test_webdav_backup_sync.py
+  s_603a75da2004cb::t_1e39316f4d81c1 226-248
+  s_603a75da2004cb::t_69147f9cd1299d 1-225,249-342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "469cac5c2c5a6cdea68146dd6ec459c290bbdce7",
+  "prompts": {},
+  "sessions": {
+    "s_603a75da2004cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a01f51-35f3-7a70-8ce7-36f61f4b1828",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "kiliter <kiliter@qq.com>"
+    }
+  }
+}
