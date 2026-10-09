@@ -28,8 +28,7 @@
           "verify_ssl": true
         }
       ],
-      "retention_count": 10,
-      "filename_prefix": "MoviePilot-Backup-"
+      "retention_count": 10
     },
     {
       "name": "MoviePilot 副实例",
@@ -51,8 +50,7 @@
           "verify_ssl": true
         }
       ],
-      "retention_count": 5,
-      "filename_prefix": "MoviePilot-Backup-"
+      "retention_count": 5
     }
   ],
   "timeout_seconds": 60,

@@ -45,6 +45,7 @@ class MockState:
     """保存模拟 WebDAV 的文件和调用事件。"""
 
     files: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    modified: dict[tuple[str, str], str | None] = field(default_factory=dict)
     events: list[str] = field(default_factory=list)
     failed_put_roots: set[str] = field(default_factory=set)
 
@@ -88,7 +89,7 @@ class MockHandler(BaseHTTPRequestHandler):
         directory_type = ElementTree.SubElement(directory_prop, "{DAV:}resourcetype")
         ElementTree.SubElement(directory_type, "{DAV:}collection")
 
-        for filename, data in state.files.get(path, {}).items():
+        for index, (filename, data) in enumerate(state.files.get(path, {}).items()):
             response = ElementTree.SubElement(root, "{DAV:}response")
             ElementTree.SubElement(response, "{DAV:}href").text = (
                 path + "/" + urllib.parse.quote(filename)
@@ -97,6 +98,12 @@ class MockHandler(BaseHTTPRequestHandler):
             prop = ElementTree.SubElement(propstat, "{DAV:}prop")
             ElementTree.SubElement(prop, "{DAV:}resourcetype")
             ElementTree.SubElement(prop, "{DAV:}getcontentlength").text = str(len(data))
+            ElementTree.SubElement(propstat, "{DAV:}status").text = "HTTP/1.1 200 OK"
+            modified = state.modified.get(
+                (path, filename), f"Thu, 20 Aug 2026 02:00:{index:02d} GMT"
+            )
+            if modified is not None:
+                ElementTree.SubElement(prop, "{DAV:}getlastmodified").text = modified
         self._send(207, ElementTree.tostring(root), "application/xml")
 
     def do_GET(self) -> None:  # noqa: N802 - HTTP 方法名由协议规定。
@@ -121,6 +128,7 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         directory, _, filename = path.rpartition("/")
         state.files.setdefault(directory, {})[filename] = data
+        state.modified[(directory, filename)] = "Fri, 09 Oct 2026 08:00:00 GMT"
         self._send(201)
 
     def do_DELETE(self) -> None:  # noqa: N802 - WebDAV 方法名由协议规定。
@@ -274,6 +282,7 @@ class WebDAVBackupSyncTests(unittest.TestCase):
             state.files["/source-b"] = {second_group_latest: make_zip("副实例")}
             state.files["/target-c"] = {}
 
+            state.modified[("/source-a", "manual.zip")] = "Wed, 19 Aug 2026 00:00:00 GMT"
             notification = FakeQLAPI()
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -320,6 +329,60 @@ class WebDAVBackupSyncTests(unittest.TestCase):
             self.assertNotIn(latest_a, state.files["/target-a"])
             self.assertIn(latest_a, state.files["/target-b"])
             self.assertIn(latest_b, state.files["/target-c"])
+
+    def test_arbitrary_files_use_modified_time_and_preserve_unknown_times(self) -> None:
+        """名称和扩展名不限制同步，清理按修改时间且跳过未知时间。"""
+
+        with MockServices() as services:
+            state = services.state
+            latest = "moviepilot_v3.1.2-1_sqlite_20261009_080000.db"
+            state.files["/source-a"] = {
+                latest: b"SQLite format 3\0test",
+                "z_future_20990101.zip": b"older",
+                "unknown": b"unknown",
+                "bad-time": b"bad",
+            }
+            state.modified.update({
+                ("/source-a", latest): "Fri, 09 Oct 2026 08:00:00 GMT",
+                ("/source-a", "unknown"): None,
+                ("/source-a", "bad-time"): "invalid",
+            })
+            state.files["/target-a"] = {
+                "manual.txt": b"old",
+                "keep.any": b"recent",
+                "unknown": b"unknown",
+                "bad-time": b"bad",
+            }
+            state.modified.update({
+                ("/target-a", "unknown"): None,
+                ("/target-a", "bad-time"): "invalid",
+            })
+            raw = json.loads(make_config(services.base_url))
+            raw["groups"] = [raw["groups"][0]]
+            raw["groups"][0]["filename_prefix"] = "old-prefix-"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_task(parse_config(json.dumps(raw)),
+                                notification_sender=lambda *_args: None)
+            self.assertEqual(0, code)
+            self.assertEqual({latest, "keep.any", "unknown", "bad-time"},
+                             set(state.files["/target-a"]))
+            self.assertEqual(state.files["/source-a"][latest], state.files["/target-b"][latest])
+            self.assertEqual(1, sum(event.startswith("GET ") for event in state.events))
+            self.assertFalse(any(event.startswith("DELETE /source-a/") for event in state.events))
+
+    def test_http_time_zones_and_ties(self) -> None:
+        """时区统一后排序，时间相同使用名称稳定排序，无效日期不参与。"""
+
+        parse = sync_module.parse_modified_time
+        self.assertEqual(parse("Fri, 09 Oct 2026 08:00:00 GMT"),
+                         parse("Fri, 09 Oct 2026 10:00:00 +0200"))
+        for value in (None, "invalid", "Fri, 09 Oct 2026 08:00:00", "Fri, 99 Oct 2026 08:00:00 GMT"):
+            self.assertIsNone(parse(value))
+        timestamp = parse("Fri, 09 Oct 2026 08:00:00 GMT")
+        files = [sync_module.RemoteFile("a", 1, timestamp),
+                 sync_module.RemoteFile("z", 1, timestamp),
+                 sync_module.RemoteFile("unknown", 1)]
+        self.assertEqual(["z", "a"], [item.name for item in sync_module.matching_backups(files)])
 
     def test_duplicate_group_names_are_rejected(self) -> None:
         """重复同步组名称必须在网络请求前被拒绝。"""

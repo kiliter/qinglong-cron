@@ -10,22 +10,18 @@ MoviePilot WebDAV 备份插件在 MoviePilot 容器内生成备份，并上传�
 
 每个同步组严格按照以下流程执行：
 
-1. 列出 `source` 目录，仅识别符合命名格式的 ZIP 文件。
-2. 按文件名时间排序，只选择最新一个源文件。
+1. 列出 `source` 目录，读取所有普通文件及 WebDAV `getlastmodified` 修改时间，不处理子目录。
+2. 按修改时间倒序排列（时间相同时按文件名倒序），只选择最新一个源文件。
 3. 依次检查每个 `target` 是否存在同名文件。
 4. 目标已存在同名文件时直接跳过，不上传，也不执行清理。
-5. 至少一个目标缺少文件时，只从源端下载一次 ZIP，并校验 ZIP 有效性。
-6. 将同一份 ZIP 上传到所有缺失目标。
-7. 每个目标上传成功后，删除该目标中超出 `retention_count` 数量的最旧备份。
+5. 至少一个目标缺少文件时，只从源端下载一次文件，检查非空及大小上限，不限制扩展名和内容格式。
+6. 将同一份文件 上传到所有缺失目标。
+7. 每个目标上传成功后，按目标端修改时间倒序保留前 `retention_count` 个普通文件，删除其余文件。
 8. 单个目标或同步组失败不会阻止其他目标和同步组继续执行，不进行回滚。
 
-默认识别以下 MoviePilot 备份文件名：
+源端和目标端的所有普通文件都参与排序，不再根据 MoviePilot 前缀、版本号、文件名日期或扩展名筛选，支持 `.db`、`.zip` 等文件。修改时间缺失、无时区或无效的文件会记录提示，不参与最新文件选择和自动删除，因而目录实际文件数可能超过保留数量。
 
-```text
-MoviePilot-Backup-YYYY-MM-DD_HH-MM-SS.zip
-```
-
-手工文件、名称不匹配文件和日期无效文件不会被同步或删除。
+目标端使用该 WebDAV 服务返回的修改时间，通常为上传时间；补传旧备份也可能排在最前面。源端文件不会删除。目标目录中的手工文件也会参与清理，请将此目录作为专用备份目录。
 
 ## 3. 青龙配置
 
@@ -59,8 +55,7 @@ MoviePilot-Backup-YYYY-MM-DD_HH-MM-SS.zip
           "verify_ssl": true
         }
       ],
-      "retention_count": 10,
-      "filename_prefix": "MoviePilot-Backup-"
+      "retention_count": 10
     }
   ],
   "timeout_seconds": 60,
@@ -77,7 +72,7 @@ MoviePilot-Backup-YYYY-MM-DD_HH-MM-SS.zip
 | `groups[].source` | 是 | 本组唯一源 WebDAV。 |
 | `groups[].targets` | 是 | 目标 WebDAV 数组，至少包含一个目标。 |
 | `groups[].retention_count` | 否 | 每个目标保留的备份数量，默认 `10`。 |
-| `groups[].filename_prefix` | 否 | 备份文件名前缀，默认 `MoviePilot-Backup-`。 |
+| `groups[].filename_prefix` | 否 | 已废弃；旧配置可以保留此字段，但不再参与筛选。 |
 | `source/targets[].name` | 否 | 日志和通知中显示的名称；同组目标名称不得重复。 |
 | `source/targets[].url` | 是 | WebDAV 服务地址，可包含服务本身的路径前缀。 |
 | `source/targets[].username` | 是 | WebDAV 用户名。 |

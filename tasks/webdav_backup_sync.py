@@ -6,30 +6,27 @@ name: WebDAV 备份多目标同步
 cron: 10 2 * * *
 
 配置通过青龙环境变量 ``WEBDAV_BACKUP_SYNC_CONFIG`` 提供。任务支持 N 组
-``source -> targets``，默认同步 MoviePilot WebDAV 备份插件生成的 ZIP 文件。
+``source -> targets``，按 WebDAV 修改时间同步目录中的最新普通文件。
 """
 
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
-import re
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 from xml.etree import ElementTree
 
 
 CONFIG_ENV_NAME = "WEBDAV_BACKUP_SYNC_CONFIG"
-DEFAULT_FILENAME_PREFIX = "MoviePilot-Backup-"
 DEFAULT_RETENTION_COUNT = 10
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_BACKUP_MB = 512
@@ -71,7 +68,6 @@ class SyncGroupConfig:
     source: WebDAVEndpoint
     targets: tuple[WebDAVEndpoint, ...]
     retention_count: int = DEFAULT_RETENTION_COUNT
-    filename_prefix: str = DEFAULT_FILENAME_PREFIX
 
 
 @dataclass(frozen=True)
@@ -89,6 +85,7 @@ class RemoteFile:
 
     name: str
     size: int | None
+    modified_at: datetime | None = None
 
 
 @dataclass
@@ -233,24 +230,12 @@ def parse_config(raw: str) -> AppConfig:
             or not 1 <= retention_count <= 3650
         ):
             raise ConfigError(f"配置字段 {field_name}.retention_count 必须是 1 到 3650 之间的整数")
-        filename_prefix = group_obj.get("filename_prefix", DEFAULT_FILENAME_PREFIX)
-        if (
-            not isinstance(filename_prefix, str)
-            or not filename_prefix
-            or "/" in filename_prefix
-            or "\\" in filename_prefix
-            or len(filename_prefix) > 128
-        ):
-            raise ConfigError(
-                f"配置字段 {field_name}.filename_prefix 必须是不含路径分隔符的非空字符串"
-            )
         groups.append(
             SyncGroupConfig(
                 name=name,
                 source=source,
                 targets=targets,
                 retention_count=retention_count,
-                filename_prefix=filename_prefix,
             )
         )
 
@@ -384,7 +369,7 @@ class WebDAVClient:
         """使用 Depth=1 的 PROPFIND 列出根目录普通文件。"""
 
         request_body = b"""<?xml version="1.0" encoding="utf-8"?>
-<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>"""
+<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>"""
         try:
             _, _, body = http_request(
                 self.url_for(),
@@ -422,11 +407,24 @@ class WebDAVClient:
                 size = int(size_node.text) if size_node is not None and size_node.text else None
             except (TypeError, ValueError):
                 size = None
-            files.append(RemoteFile(name=name, size=size))
+            # 仅使用成功返回的属性，避免把 404 属性中的时间用于清理。
+            modified_at = None
+            for propstat in response.findall("{DAV:}propstat"):
+                status = (propstat.findtext("{DAV:}status") or "").split()
+                if len(status) < 2 or status[1] != "200":
+                    continue
+                modified_at = parse_modified_time(
+                    propstat.findtext("{DAV:}prop/{DAV:}getlastmodified")
+                )
+                if modified_at is not None:
+                    break
+            if modified_at is None:
+                print(f"[跳过排序] {name}：修改时间缺失或无效，不参与同步选择和清理")
+            files.append(RemoteFile(name=name, size=size, modified_at=modified_at))
         return files
 
     def download(self, filename: str, max_backup_bytes: int) -> bytes:
-        """下载并校验 ZIP 备份内容。"""
+        """下载普通文件，保留大小限制和非空检查。"""
 
         _, _, data = http_request(
             self.url_for(filename),
@@ -436,8 +434,8 @@ class WebDAVClient:
             verify_ssl=self.config.verify_ssl,
             max_response_bytes=max_backup_bytes,
         )
-        if not data or not zipfile.is_zipfile(io.BytesIO(data)):
-            raise RequestError("源端返回内容不是有效 ZIP 备份")
+        if not data:
+            raise RequestError("源端返回内容为空")
         return data
 
     def upload(self, filename: str, data: bytes) -> None:
@@ -447,7 +445,7 @@ class WebDAVClient:
         status, _, _ = http_request(
             self.url_for(filename),
             method="PUT",
-            headers=self._headers({"Content-Type": "application/zip"}),
+            headers=self._headers({"Content-Type": "application/octet-stream"}),
             data=data,
             timeout=self.timeout,
             verify_ssl=self.config.verify_ssl,
@@ -471,32 +469,28 @@ class WebDAVClient:
             raise RequestError(f"DELETE 请求返回非预期状态 {status}")
 
 
-def backup_timestamp(filename: str, filename_prefix: str) -> datetime | None:
-    """解析 MoviePilot 风格备份文件名；不匹配或日期无效时返回 ``None``。"""
+def parse_modified_time(value: str | None) -> datetime | None:
+    """解析 WebDAV HTTP 日期并统一为 UTC；无时区或非法时间不参与排序。"""
 
-    pattern = re.compile(
-        rf"^{re.escape(filename_prefix)}(?P<timestamp>\d{{4}}-\d{{2}}-\d{{2}}_"
-        rf"\d{{2}}-\d{{2}}-\d{{2}})\.zip$"
-    )
-    match = pattern.fullmatch(filename)
-    if match is None:
+    if not value:
         return None
     try:
-        return datetime.strptime(match.group("timestamp"), "%Y-%m-%d_%H-%M-%S")
-    except ValueError:
+        timestamp = parsedate_to_datetime(value)
+        if timestamp.tzinfo is None:
+            return None
+        return timestamp.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def matching_backups(files: list[RemoteFile], filename_prefix: str) -> list[RemoteFile]:
-    """筛选合法备份并按文件名时间从新到旧排序。"""
+def matching_backups(files: list[RemoteFile]) -> list[RemoteFile]:
+    """所有普通文件按修改时间倒序排列，同一时间按文件名倒序稳定排序。"""
 
-    candidates = [
-        (timestamp, remote_file)
-        for remote_file in files
-        if (timestamp := backup_timestamp(remote_file.name, filename_prefix)) is not None
-    ]
-    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
-    return [remote_file for _, remote_file in candidates]
+    return sorted(
+        (item for item in files if item.modified_at is not None),
+        key=lambda item: (item.modified_at, item.name),
+        reverse=True,
+    )
 
 
 def sync_group(config: SyncGroupConfig, timeout: int, max_backup_bytes: int) -> GroupResult:
@@ -507,7 +501,7 @@ def sync_group(config: SyncGroupConfig, timeout: int, max_backup_bytes: int) -> 
     print(f"[开始] 同步组：{config.name}")
     try:
         source_backups = matching_backups(
-            source_client.list_files(), config.filename_prefix
+            source_client.list_files()
         )
     except SyncError as exc:
         result.errors.append(f"源端列表失败：{exc}")
@@ -515,7 +509,7 @@ def sync_group(config: SyncGroupConfig, timeout: int, max_backup_bytes: int) -> 
         return result
 
     if not source_backups:
-        result.errors.append("源端没有找到符合命名规则的 ZIP 备份")
+        result.errors.append("源端没有找到修改时间有效的普通文件")
         print(f"[失败] {config.name}：{result.errors[-1]}")
         return result
     source_file = source_backups[0]
@@ -570,7 +564,7 @@ def sync_group(config: SyncGroupConfig, timeout: int, max_backup_bytes: int) -> 
             current_files = clients[target_name].list_files()
             if not any(remote_file.name == source_file.name for remote_file in current_files):
                 raise RequestError("上传完成后未在目标目录检测到最新备份，已停止清理")
-            current_backups = matching_backups(current_files, config.filename_prefix)
+            current_backups = matching_backups(current_files)
             for remote_file in current_backups[config.retention_count :]:
                 clients[target_name].delete(remote_file.name)
                 target_result.deleted += 1
